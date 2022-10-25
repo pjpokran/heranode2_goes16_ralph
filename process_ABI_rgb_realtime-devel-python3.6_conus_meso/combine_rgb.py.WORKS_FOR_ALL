@@ -1,0 +1,380 @@
+# -*- coding: utf-8 -*-
+"""
+This function converts flat-binary-format data output from polar2grid to a rgb or grayscale image.
+
+It is used in two main modes rgb, and grayscale:
+    RGB
+    The three channel input files must be supplied for the red, green, and blue channels.
+    The data can be from any channel but they way they are assigned is how the image
+    will be assembled.
+    GRAYSCALE
+    For a grayscale image, you must only supply the red channel. If you want to display 
+    brightness temperature data then supply the bt flag as shown in the help.
+    For orbits that are descending you can supply the rotation flag to correctly orientate 
+    the data. This is paritcularly important if you are working with data in the oblique
+    mercator projection.
+"""
+
+import numpy as np
+from pyhdf.SD import *
+import matplotlib.image as mpimg
+from argparse import ArgumentParser
+#from satplotlib import *
+from satutil_lib import *
+import pprint
+import os
+import logging
+
+idx = np.array([0, 30, 60, 120, 190, 255])/255.0
+sc  = np.array([0, 110, 160, 210, 240, 255])/255.0
+
+
+def mask_RGB(R,G,B):
+    ii = np.where(~np.isfinite(R))
+    R[ii] = -999.0
+    ii = np.where(~np.isfinite(G))
+    G[ii] = -999.0
+    ii = np.where(~np.isfinite(B))
+    B[ii] = -999.0
+    bIs_FV = logical_or(less(R,0.0),less(G,0.0))
+    bIs_FV = logical_or(bIs_FV,less(B,0.0))
+
+    #ii = np.where(~bIs_FV)
+    #print np.median(R[ii]),np.std(R[ii])
+
+    ii = np.where(greater(R,1.0))
+    R[ii] = 1.0
+    ii = np.where(greater(G,1.0))
+    G[ii] = 1.0
+    ii = np.where(greater(B,1.0))
+    B[ii] = 1.0
+
+    ii = np.where(bIs_FV)
+    R[ii] = 1.0/255.0
+    G[ii] = 1.0/255.0
+    B[ii] = 1.0/255.0
+    A = np.ones(np.shape(R),dtype=np.uint8) * 255
+    A[ii] = 0
+    return R,G,B,A
+
+def rescale(R,G,B):
+    ii = np.where(~np.isfinite(R))
+    R[ii] = -999.0
+    ii = np.where(~np.isfinite(G))
+    G[ii] = -999.0
+    ii = np.where(~np.isfinite(B))
+    B[ii] = -999.0
+    bIs_FV = logical_or(less(R,0.0),less(G,0.0))
+    bIs_FV = logical_or(bIs_FV,less(B,0.0))
+
+    #ii = np.where(~bIs_FV)
+    #print np.median(R[ii]),np.std(R[ii])
+
+    ii = np.where(greater(R,1.0))
+    R[ii] = 1.0
+    ii = np.where(greater(G,1.0))
+    G[ii] = 1.0
+    ii = np.where(greater(B,1.0))
+    B[ii] = 1.0
+
+
+    R2 = np.copy(R)
+    G2 = np.copy(G)
+    B2 = np.copy(B)
+    
+    for i in range(1,len(idx)):
+        ii = np.where(np.logical_and(np.greater(R,idx[i-1]),np.less_equal(R,idx[i])))
+        rsc = (sc[i] - sc[i-1])/(idx[i] - idx[i-1])
+        R2[ii] = (R[ii] - idx[i-1])*rsc + sc[i-1]
+        ii = np.where(np.logical_and(np.greater(G,idx[i-1]),np.less_equal(G,idx[i])))
+        G2[ii] = (G[ii] - idx[i-1])*rsc + sc[i-1]
+        ii = np.where(np.logical_and(np.greater(B,idx[i-1]),np.less_equal(B,idx[i])))
+        B2[ii] = (B[ii] - idx[i-1])*rsc + sc[i-1]
+
+    ii = np.where(bIs_FV)
+    R2[ii] = 0
+    G2[ii] = 0
+    B2[ii] = 0
+    A = np.ones(np.shape(R2),dtype=np.uint8) * 255
+    A[ii] = 0
+    return R2,G2,B2,A
+
+
+def rescale_single(R):
+    ii = np.where(greater(R,1.0))
+    R[ii] = 1.0
+    R2 = np.copy(R)
+    for i in range(1,len(idx)):
+        ii = np.where(np.logical_and(np.greater(R,idx[i-1]),np.less_equal(R,idx[i])))
+        rsc = (sc[i] - sc[i-1])/(idx[i] - idx[i-1])
+        R2[ii] = (R[ii] - idx[i-1])*rsc + sc[i-1]
+
+    return R2
+
+def get_dim_from_filename(fname,atype='real4'):
+    # Returs the dimensions from the flat binary file filename
+    (adir,fname) = os.path.split(fname)
+    dims_txt = fname.split(atype)[1].split('.')
+    dims = [int(dims_txt[2]),int(dims_txt[1])]
+
+    return dims
+
+
+def combine_rgb_data(red=None,grn=None,blu=None, renorm=1.1, no_nonlin_scale=False, rotate=None,alpha=True):
+    log = logging.getLogger(__name__)
+    dims = np.shape(red)
+    red /= renorm
+    grn /= renorm
+    blu /= renorm
+
+    if not no_nonlin_scale:
+        log.debug("Applying nonlinear channel rescaling")
+        red,grn,blu,A = rescale(red,grn,blu)
+    else:
+        log.debug("Simple reflectance masking")
+        red,grn,blu,A = mask_RGB(red, grn, blu)
+
+
+    dim1 = dims[0]
+    dim2 = dims[1]
+
+    if rotate == '90':
+        red = np.rot90(red,k=1)
+        grn = np.rot90(grn,k=1)
+        blu = np.rot90(blu,k=1)
+        A = np.rot90(A,k=1)
+        dim1 = dims[1]
+        dim2 = dims[0]
+    elif rotate == '-90':
+        dim1 = dims[1]
+        dim2 = dims[0]
+        red = np.rot90(red,k=3)
+        grn = np.rot90(grn,k=3)
+        blu = np.rot90(blu,k=3)
+        A = np.rot90(A,k=3)
+
+    if alpha:
+        out = np.zeros((dim1,dim2,4),dtype=np.uint8)
+        out[:,:,3] = A
+    else:
+        out = np.zeros((dim1,dim2,3),dtype=np.uint8)
+    out[:,:,0] = np.uint8(red *255)
+    out[:,:,1] = np.uint8(grn *255)
+    out[:,:,2] = np.uint8(blu *255)
+
+    #mpimg.imsave(os.path.join(output_path,oname),out)
+    return out
+
+
+
+def combine_rgb(output_path='./',fnred=None,fngreen=None,fnblue=None,fnir=None, fake_green=True, no_nonlin_scale=False,rotate=None,alpha=True,renorm=1.1):
+    log = logging.getLogger(__name__)
+    dims = get_dim_from_filename(fnred)
+    red = np.fromfile(fnred,dtype=np.float32)/renorm
+    grn = np.fromfile(fngreen,dtype=np.float32)/renorm
+    blu = np.fromfile(fnblue,dtype=np.float32)/renorm
+    
+#    ipdb.set_trace()
+
+    is_jpg = True
+    if alpha and is_jpg:
+        alpha = False
+
+    if fake_green:
+        #new_grn = np.zeros_like(grn)
+        #TODO only apply to unmasked (not space) pixels
+        new_grn = 0.45*red + 0.10*grn + 0.45*blu
+        grn = new_grn
+
+
+    if fnir:
+        # From /Users/kuehn/Dropbox/MatlabCode/plot_ahi_loc_scatt.m line 140
+        #idx = d > 2 & rho4 > 0.27 & rho4 < 0.45 & d < 1.17*d2;
+        log.debug('Applying near-ir green correction to rgb image')
+        nir = np.fromfile(fnir,dtype=np.float32)
+        x = nir/grn
+        x2 = nir/red
+        A = np.greater(x,2.0)
+        B = np.logical_and(np.greater(nir, 0.27), A)
+        A = np.logical_and(np.less(nir, 0.45), B)
+        B = np.logical_and(np.less(x,1.17*x2), A)
+        idx = np.where(B)[0]
+        #rho2p(idx) = rho2(idx)*0.4 + rho4(idx)*0.22
+
+        #grn[idx] = grn[idx]*0.6 + nir[idx]*0.12
+        grn = grn+nir*0.035
+        
+
+    #ipdb.set_trace()
+    if not no_nonlin_scale:
+        log.debug("Applying nonlinear channel rescaling")
+        red,grn,blu,A = rescale(red,grn,blu)
+    else:
+        log.debug("Simple reflectance masking")
+        red,grn,blu,A = mask_RGB(red, grn, blu)
+
+
+
+    red = np.reshape(red,(dims[0],dims[1]))
+    grn = np.reshape(grn,(dims[0],dims[1]))
+    blu = np.reshape(blu,(dims[0],dims[1]))
+    A = np.reshape(A,(dims[0],dims[1]))
+
+    dim1 = dims[0]
+    dim2 = dims[1]
+
+    if rotate == '90':
+        red = np.rot90(red,k=1)
+        grn = np.rot90(grn,k=1)
+        blu = np.rot90(blu,k=1)
+        A = np.rot90(A,k=1)
+        dim1 = dims[1]
+        dim2 = dims[0]
+    elif rotate == '-90':
+        dim1 = dims[1]
+        dim2 = dims[0]
+        red = np.rot90(red,k=3)
+        grn = np.rot90(grn,k=3)
+        blu = np.rot90(blu,k=3)
+        A = np.rot90(A,k=3)
+
+    if alpha:
+        out = np.zeros((dim1,dim2,4),dtype=np.uint8)
+        out[:,:,3] = A
+    else:
+        out = np.zeros((dim1,dim2,3),dtype=np.uint8)
+    out[:,:,0] = np.uint8(red *255)
+    out[:,:,1] = np.uint8(grn *255)
+    out[:,:,2] = np.uint8(blu *255)
+
+    # npp_viirs_visible_04_20140125_174000_omerc.real4.2300.3150
+    (adir,fname) = os.path.split(fnred)
+    prefix = fname.split('.real4.')[0]
+    oname = prefix + '_rgb_nofilt.jpg'
+    #oname = prefix + '_rgb_nofilt.png'
+    mpimg.imsave(os.path.join(output_path,oname),out)
+
+    from PIL import Image
+    from PIL import ImageFilter
+    from PIL import ImageEnhance
+    image = Image.open(os.path.join(output_path,oname))
+    #image = image.filter(ImageFilter.SHARPEN)
+    saturation = 1.25
+    if saturation:
+        #print(saturation)
+        enhancer = ImageEnhance.Color(image)
+        image = enhancer.enhance(saturation)
+    brightness = 1.05
+    if brightness:
+        #print(brightness)
+        enhancer = ImageEnhance.Brightness(image)
+        image = enhancer.enhance(brightness)
+
+    oname = prefix + '_rgb.jpg'
+    image.save(os.path.join(output_path,oname))
+#    oname = prefix + '_rgb.jpg'
+#    image.save(os.path.join(output_path,oname))
+
+def fbf2grayscale(output_path='./',fnred=None, isBT=False, rotate=None):
+    log = logging.getLogger(__name__)
+    from PIL import Image
+    from pylab import cm
+    dims = get_dim_from_filename(fnred)
+    log.debug('fbf2grayscale: ', fnred)
+    #print(dims)
+    if isBT:
+        red = np.fromfile(fnred,dtype=np.float32)
+    else:
+        red = np.fromfile(fnred,dtype=np.float32)/1.1
+
+    #if nonlin_scale:
+    #    red = rescale_single(red)
+
+    ii = np.where(~np.isfinite(red))
+    red[ii] = 0
+    ii = np.where(less(red,0.0))
+    red[ii] = 0
+    if isBT:
+        ii = np.where(greater(red,0.0))
+        tmin = np.min(red[ii])
+        if tmin < 150.0:
+            tmin = 150.0
+        log.debug("Min value %f" % (tmin))
+        tmin = 200.0
+        log.debug("Set Min value %f" % (tmin))
+        sf = np.round(np.max(red))
+        log.debug("Max value %f" % (sf))
+        sf = 300.0
+        log.debug("Set Max value %f" % (sf))
+        red[ii] = red[ii] - tmin
+        sf = np.round(sf-tmin)
+        #sf = np.round(np.max(red))
+        log.debug("Max shifted value %f" % (sf))
+        red[ii] = red[ii]/sf
+        log.debug("Max value %f" % (np.max(red)))
+        log.debug("Min value %f" % (np.min(red)))
+
+    red = np.reshape(red,(dims[0],dims[1]))
+
+    if rotate == '90':
+        red = np.rot90(red,k=1)
+    elif rotate == '-90':
+        red = np.rot90(red,k=3)
+
+    
+    if isBT:
+        im = Image.fromarray(cm.gray_r(red, bytes=True))
+    else:
+        im = Image.fromarray(cm.gray(red, bytes=True))
+
+    (adir,fname) = os.path.split(fnred)
+    prefix = fname.split('.real4.')[0]
+    #im.save(output_path + '/' + prefix + '_grayscale.png')
+    im.save(output_path + '/' + prefix + '_grayscale.jpg')
+#    out = np.zeros((dims[0],dims[1],3),dtype=np.uint8)
+#    out[:,:,0] = np.uint8(red *255)
+#    out[:,:,1] = np.uint8(red *255)
+#    out[:,:,2] = np.uint8(red *255)
+ 
+#    (adir,fname) = os.path.split(fnred)
+#    prefix = fname.split('.real4.')[0]
+#    mpimg.imsave(output_path + '/' + prefix + '_rgb.png',out)
+
+if __name__ == '__main__':
+    import init_ahi_log
+    init_ahi_log.setup_log()
+    log = logging.getLogger(__name__)
+    parser = ArgumentParser(description=__doc__)
+    #group = parser.add_mutually_exclusive_group(required=True)
+    parser.add_argument('-o', '--output_path', help='Directory for output file (mandatory)', required=True)
+    #parser.add_argument('-iffcth','--IFF-CTH', action='store_true', default=False, help='VIIRS IFF CTH imagery')
+    parser.add_argument('-r','--red', help='Red', required=True)
+    parser.add_argument('-g','--green', help='Green')
+    parser.add_argument('-b','--blue', help='Blue')
+    parser.add_argument('-z','--no-nonlin-scale', action='store_true', default=False)
+    parser.add_argument('-t','--is-bt',action='store_true', default=False, help='Flag to rescale brightness temperature bands appropriately')
+    parser.add_argument('--rot-night',action='store_true', default=False, help='Rotation for descending orbit... night, else it rotates for day ')
+    parser.add_argument('--renorm-value', help='Renormalization reflectance value, default is 1.1')
+    args = parser.parse_args()
+
+    log.debug(args.no_nonlin_scale)
+
+    if args.renorm_value:
+        renorm = float(args.renorm_value)
+    else:
+        renorm = 1.1
+
+    #ipdb.set_trace()
+    if not args.green and not args.blue:
+        if args.is_bt:
+            is_bt = True
+        else:
+            is_bt = False
+        #print is_bt
+        if args.rot_night:
+            rot='-90'
+        else:
+            rot='90'
+        fbf2grayscale(output_path=args.output_path,fnred=args.red,isBT=is_bt,rotate=rot)
+    else:
+        combine_rgb(output_path=args.output_path,fnred=args.red,fngreen=args.green,fnblue=args.blue,no_nonlin_scale=args.no_nonlin_scale,renorm=renorm)
